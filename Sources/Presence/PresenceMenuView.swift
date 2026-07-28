@@ -13,6 +13,9 @@ struct PresenceMenuView: View {
             footer
         }
         .frame(width: 340)
+        .onAppear {
+            controller.recordInteraction()
+        }
     }
 
     private var header: some View {
@@ -155,6 +158,7 @@ struct PresenceMenuView: View {
 
             HStack {
                 Button(controller.isPaused ? "Resume" : "Pause") {
+                    controller.recordInteraction()
                     controller.isPaused.toggle()
                 }
                 .disabled(!controller.isEnabled)
@@ -182,4 +186,3 @@ struct PresenceMenuView: View {
         }
     }
 }
-

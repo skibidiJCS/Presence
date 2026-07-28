@@ -72,9 +72,11 @@ final class PresenceController: ObservableObject {
     private let cameraMonitor = CameraMonitor()
     private var policy = PresencePolicy()
     private var timer: Timer?
+    private var localEventMonitor: Any?
     private var displaySleepActivity: NSObjectProtocol?
     private var started = false
     private var lastCameraRefresh: TimeInterval = 0
+    private var lastLocalInteractionAt = ProcessInfo.processInfo.systemUptime
     private var cameraRetryAfter: TimeInterval = 0
     private var cameraFailureMessage: String?
 
@@ -104,6 +106,24 @@ final class PresenceController: ObservableObject {
             }
         }
 
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [
+                .keyDown,
+                .leftMouseDown,
+                .rightMouseDown,
+                .otherMouseDown,
+                .scrollWheel,
+                .leftMouseDragged,
+                .rightMouseDragged,
+                .otherMouseDragged
+            ]
+        ) { [weak self] event in
+            Task { @MainActor in
+                self?.recordInteraction()
+            }
+            return event
+        }
+
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(
             self,
@@ -124,12 +144,17 @@ final class PresenceController: ObservableObject {
     func shutdown() {
         timer?.invalidate()
         timer = nil
+        if let localEventMonitor {
+            NSEvent.removeMonitor(localEventMonitor)
+            self.localEventMonitor = nil
+        }
         stopCamera()
         allowDisplaySleep()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        recordInteraction()
         do {
             if enabled {
                 try SMAppService.mainApp.register()
@@ -144,6 +169,7 @@ final class PresenceController: ObservableObject {
     }
 
     func openCameraSettings() {
+        recordInteraction()
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
         ) else { return }
@@ -151,6 +177,7 @@ final class PresenceController: ObservableObject {
     }
 
     func openLoginItemSettings() {
+        recordInteraction()
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
         ) else { return }
@@ -158,11 +185,15 @@ final class PresenceController: ObservableObject {
     }
 
     func formattedTimer(_ seconds: TimeInterval) -> String {
-        if seconds < 60 {
-            return "\(Int(seconds)) seconds"
-        }
-        let minutes = Int(seconds / 60)
-        return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+        DurationText.timerLabel(seconds: seconds)
+    }
+
+    func recordInteraction() {
+        lastLocalInteractionAt = ProcessInfo.processInfo.systemUptime
+        stopCamera()
+        allowDisplaySleep()
+        resetCameraRetry()
+        reevaluate()
     }
 
     @objc private func screenDidSleep() {
@@ -232,7 +263,10 @@ final class PresenceController: ObservableObject {
             return
         }
 
-        let idleTime = Self.userIdleTime
+        let idleTime = InactivityPolicy.effectiveIdleTime(
+            systemIdleTime: Self.userIdleTime,
+            localIdleTime: now - lastLocalInteractionAt
+        )
         guard idleTime >= inactivitySeconds else {
             status = .waiting(secondsRemaining: inactivitySeconds - idleTime)
             stopCamera()

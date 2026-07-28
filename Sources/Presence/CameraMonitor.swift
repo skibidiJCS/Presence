@@ -1,5 +1,4 @@
 @preconcurrency import AVFoundation
-import CoreImage
 import Foundation
 @preconcurrency import Vision
 
@@ -19,7 +18,9 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var observationHandler: (@Sendable (Bool) -> Void)?
     private var errorHandler: (@Sendable (String) -> Void)?
     private var lastAnalysisTime: TimeInterval = 0
+    private var lastBodyAnalysisTime: TimeInterval = 0
     private let analysisInterval: TimeInterval = 1
+    private let bodyAnalysisInterval: TimeInterval = 3
 
     static func availableCameras() -> [CameraChoice] {
         var deviceTypes: [AVCaptureDevice.DeviceType] = [
@@ -109,7 +110,7 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             session.addOutput(output)
             session.commitConfiguration()
 
-            lowerFrameRateIfSupported(for: selectedDevice)
+            lowerFrameRate(for: selectedDevice)
             session.startRunning()
         } catch {
             errorHandler?("Could not start \(selectedDevice.localizedName).")
@@ -134,22 +135,25 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         ).devices
     }
 
-    private func lowerFrameRateIfSupported(for device: AVCaptureDevice) {
-        let targetFPS = 2.0
-        guard device.activeFormat.videoSupportedFrameRateRanges.contains(where: {
-            $0.minFrameRate <= targetFPS && $0.maxFrameRate >= targetFPS
-        }) else {
+    private func lowerFrameRate(for device: AVCaptureDevice) {
+        guard let slowestSupportedFPS = device.activeFormat
+            .videoSupportedFrameRateRanges
+            .map(\.minFrameRate)
+            .min() else {
             return
         }
+        let targetFPS = max(1, slowestSupportedFPS)
 
         do {
             try device.lockForConfiguration()
-            let duration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
+            let duration = CMTime(
+                seconds: 1 / targetFPS,
+                preferredTimescale: 600
+            )
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
         } catch {
-            // Frame gating below still limits Vision work if the camera rejects 2 FPS.
         }
     }
 
@@ -165,28 +169,43 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
         lastAnalysisTime = now
 
-        let faceRequest = VNDetectFaceRectanglesRequest()
-        let personRequest = VNDetectHumanRectanglesRequest()
-        personRequest.upperBodyOnly = true
-
         do {
-            let handler = VNImageRequestHandler(
+            let faceRequest = VNDetectFaceRectanglesRequest()
+            let faceHandler = VNImageRequestHandler(
                 cvPixelBuffer: pixelBuffer,
                 orientation: .up,
                 options: [:]
             )
-            try handler.perform([faceRequest, personRequest])
+            try faceHandler.perform([faceRequest])
 
             let faceDetected = (faceRequest.results ?? []).contains {
                 $0.confidence >= 0.35 && $0.boundingBox.width >= 0.04
             }
+            if faceDetected {
+                observationHandler?(true)
+                return
+            }
+
+            guard now - lastBodyAnalysisTime >= bodyAnalysisInterval else {
+                return
+            }
+            lastBodyAnalysisTime = now
+
+            let personRequest = VNDetectHumanRectanglesRequest()
+            personRequest.upperBodyOnly = true
+            let personHandler = VNImageRequestHandler(
+                cvPixelBuffer: pixelBuffer,
+                orientation: .up,
+                options: [:]
+            )
+            try personHandler.perform([personRequest])
+
             let personDetected = (personRequest.results ?? []).contains {
                 $0.confidence >= 0.25 && $0.boundingBox.height >= 0.16
             }
-            observationHandler?(faceDetected || personDetected)
+            observationHandler?(personDetected)
         } catch {
             errorHandler?("On-device presence detection failed.")
         }
     }
 }
-
