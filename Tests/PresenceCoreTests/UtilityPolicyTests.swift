@@ -11,22 +11,28 @@ struct UtilityPolicyTests {
 
     @Test
     func localInteractionResetsEffectiveIdleTime() {
-        let idleTime = InactivityPolicy.effectiveIdleTime(
-            systemIdleTime: 300,
-            localIdleTime: 0
-        )
+        var clock = ActivityClock(startingAt: 0)
+        clock.recordActivity(at: 300)
+        let idleTime = clock.idleTime(at: 300, systemIdleTime: 300)
 
         #expect(idleTime == 0)
     }
 
     @Test
     func mostRecentInputSourceControlsIdleTime() {
-        let idleTime = InactivityPolicy.effectiveIdleTime(
-            systemIdleTime: 4,
-            localIdleTime: 120
-        )
+        let clock = ActivityClock(startingAt: 0)
+        let idleTime = clock.idleTime(at: 120, systemIdleTime: 4)
 
         #expect(idleTime == 4)
+    }
+
+    @Test
+    func countdownStartsAfterVideoStops() {
+        var clock = ActivityClock(startingAt: 0)
+        clock.recordActivity(at: 300)
+
+        #expect(clock.idleTime(at: 300, systemIdleTime: 300) == 0)
+        #expect(clock.idleTime(at: 310, systemIdleTime: 310) == 10)
     }
 
     @Test

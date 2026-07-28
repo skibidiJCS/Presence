@@ -1,6 +1,5 @@
 import AppKit
 @preconcurrency import AVFoundation
-import CoreGraphics
 import Foundation
 import PresenceCore
 import ServiceManagement
@@ -69,26 +68,29 @@ final class PresenceController: ObservableObject {
         static let absenceGrace = "presence.absenceGraceSeconds"
     }
 
+    private enum Timing {
+        static let tick: TimeInterval = 1
+        static let maximumProbe: TimeInterval = 5
+        static let presenceRecheck: TimeInterval = 45
+        static let displayActivityCheck: TimeInterval = 2
+        static let cameraRetry: TimeInterval = 15
+    }
+
     private let defaults = UserDefaults.standard
     private let cameraMonitor = CameraMonitor()
     private let systemDisplayActivityMonitor = SystemDisplayActivityMonitor()
+    private let userActivityMonitor = UserActivityMonitor()
+    private let displaySleepController = DisplaySleepController()
     private var policy = PresencePolicy()
     private var probeSchedule = CameraProbeSchedule()
     private var timer: Timer?
-    private var localEventMonitor: Any?
-    private var displaySleepActivity: NSObjectProtocol?
+    private var cameraDeviceObservers: [NSObjectProtocol] = []
     private var started = false
-    private var lastCameraRefresh: TimeInterval = 0
-    private var lastLocalInteractionAt = ProcessInfo.processInfo.systemUptime
-    private var nextSystemActivityCheckAt: TimeInterval = 0
-    private var anotherProcessPreventsDisplaySleep = false
+    private var nextDisplayActivityCheckAt: TimeInterval = 0
+    private var displayKeptAwakeExternally = false
     private var cameraRetryAfter: TimeInterval = 0
     private var cameraFailureMessage: String?
     private var cameraGeneration = 0
-
-    private let maximumProbeDuration: TimeInterval = 5
-    private let presenceRecheckInterval: TimeInterval = 45
-    private let systemActivityCheckInterval: TimeInterval = 3
 
     private init() {
         if defaults.object(forKey: Keys.enabled) == nil {
@@ -107,31 +109,18 @@ final class PresenceController: ObservableObject {
         started = true
 
         refreshCameras()
+        startCameraDeviceMonitoring()
         refreshLoginItemStatus()
         requestCameraAccessIfNeeded()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: Timing.tick, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.tick()
             }
         }
 
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [
-                .keyDown,
-                .leftMouseDown,
-                .rightMouseDown,
-                .otherMouseDown,
-                .scrollWheel,
-                .leftMouseDragged,
-                .rightMouseDragged,
-                .otherMouseDragged
-            ]
-        ) { [weak self] event in
-            Task { @MainActor in
-                self?.recordInteraction()
-            }
-            return event
+        userActivityMonitor.start { [weak self] in
+            self?.handleInteraction()
         }
 
         let center = NSWorkspace.shared.notificationCenter
@@ -154,12 +143,11 @@ final class PresenceController: ObservableObject {
     func shutdown() {
         timer?.invalidate()
         timer = nil
-        if let localEventMonitor {
-            NSEvent.removeMonitor(localEventMonitor)
-            self.localEventMonitor = nil
-        }
+        userActivityMonitor.stop()
+        cameraDeviceObservers.forEach(NotificationCenter.default.removeObserver)
+        cameraDeviceObservers.removeAll()
         resetMonitoringCycle()
-        allowDisplaySleep()
+        displaySleepController.allow()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
@@ -199,20 +187,24 @@ final class PresenceController: ObservableObject {
     }
 
     func recordInteraction() {
-        lastLocalInteractionAt = ProcessInfo.processInfo.systemUptime
+        userActivityMonitor.recordActivity()
+        handleInteraction()
+    }
+
+    private func handleInteraction() {
         resetMonitoringCycle()
-        allowDisplaySleep()
+        displaySleepController.allow()
         resetCameraRetry()
         reevaluate()
     }
 
     @objc private func screenDidSleep() {
         resetMonitoringCycle()
-        allowDisplaySleep()
+        displaySleepController.allow()
     }
 
     @objc private func screenDidWake() {
-        tick()
+        recordInteraction()
     }
 
     private func requestCameraAccessIfNeeded() {
@@ -229,81 +221,58 @@ final class PresenceController: ObservableObject {
 
     private func tick() {
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastCameraRefresh >= 10 {
-            refreshCameras()
-            lastCameraRefresh = now
-        }
 
         guard isEnabled else {
-            status = .disabled
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
+            suspendMonitoring(with: .disabled)
             return
         }
 
         guard !isPaused else {
-            status = .paused
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
+            suspendMonitoring(with: .paused)
+            return
+        }
+
+        refreshDisplayActivityIfNeeded(at: now)
+        if displayKeptAwakeExternally {
+            userActivityMonitor.recordActivity(at: now)
+            suspendMonitoring(with: .displayAlreadyAwake)
             return
         }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .denied, .restricted:
-            status = .permissionDenied
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
+            suspendMonitoring(with: .permissionDenied)
             return
         case .notDetermined:
-            status = .waiting(secondsRemaining: inactivitySeconds)
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
+            suspendMonitoring(with: .waiting(secondsRemaining: inactivitySeconds))
             return
         case .authorized:
             break
         @unknown default:
-            status = .cameraUnavailable("Camera permission could not be determined.")
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
+            suspendMonitoring(
+                with: .cameraUnavailable("Camera permission could not be determined.")
+            )
             return
         }
 
-        let idleTime = InactivityPolicy.effectiveIdleTime(
-            systemIdleTime: Self.userIdleTime,
-            localIdleTime: now - lastLocalInteractionAt
-        )
+        let idleTime = userActivityMonitor.idleTime(at: now)
         guard idleTime >= inactivitySeconds else {
-            status = .waiting(secondsRemaining: inactivitySeconds - idleTime)
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
-            return
-        }
-
-        refreshSystemDisplayActivityIfNeeded(at: now)
-        if anotherProcessPreventsDisplaySleep {
-            status = .displayAlreadyAwake
-            resetMonitoringCycle()
-            allowDisplaySleep()
-            resetCameraRetry()
+            suspendMonitoring(
+                with: .waiting(secondsRemaining: inactivitySeconds - idleTime)
+            )
             return
         }
 
         if isCameraActive,
            probeSchedule.probeTimedOut(
                at: now,
-               maximumDuration: maximumProbeDuration
+               maximumDuration: Timing.maximumProbe
            ) {
             policy.observe(personDetected: false, at: now)
             stopCamera()
             probeSchedule.markProbeMissed(
                 at: now,
-                recheckInterval: max(5, absenceGraceSeconds - maximumProbeDuration)
+                recheckInterval: max(5, absenceGraceSeconds - Timing.maximumProbe)
             )
         }
 
@@ -315,7 +284,7 @@ final class PresenceController: ObservableObject {
                 cameraFailureMessage
                     ?? "Camera is temporarily unavailable. Display sleep is prevented while Presence retries."
             )
-            preventDisplaySleep()
+            displaySleepController.prevent()
             return
         }
 
@@ -327,7 +296,7 @@ final class PresenceController: ObservableObject {
     private func startCamera(at time: TimeInterval) {
         guard !cameras.isEmpty else {
             status = .cameraUnavailable("No camera was found.")
-            allowDisplaySleep()
+            displaySleepController.allow()
             return
         }
 
@@ -336,7 +305,7 @@ final class PresenceController: ObservableObject {
         let generation = cameraGeneration
         probeSchedule.markProbeStarted(at: time)
         isCameraActive = true
-        preventDisplaySleep()
+        displaySleepController.prevent()
         status = .checking
 
         let deviceID = selectedCameraID.isEmpty ? nil : selectedCameraID
@@ -354,7 +323,7 @@ final class PresenceController: ObservableObject {
                     self.policy.observe(personDetected: true, at: now)
                     self.probeSchedule.markPresenceDetected(
                         at: now,
-                        recheckInterval: self.presenceRecheckInterval
+                        recheckInterval: Timing.presenceRecheck
                     )
                     self.stopCamera()
                     self.applyPolicyDecision(at: now)
@@ -371,13 +340,13 @@ final class PresenceController: ObservableObject {
                     self.stopCamera()
                     self.probeSchedule.markProbeMissed(
                         at: now,
-                        recheckInterval: 15
+                        recheckInterval: Timing.cameraRetry
                     )
                     self.cameraFailureMessage =
                         "\(message) Display sleep is prevented while Presence retries."
-                    self.cameraRetryAfter = now + 15
+                    self.cameraRetryAfter = now + Timing.cameraRetry
                     self.status = .cameraUnavailable(self.cameraFailureMessage ?? message)
-                    self.preventDisplaySleep()
+                    self.displaySleepController.prevent()
                 }
             }
         )
@@ -411,24 +380,10 @@ final class PresenceController: ObservableObject {
         }
 
         if decision.shouldKeepDisplayAwake {
-            preventDisplaySleep()
+            displaySleepController.prevent()
         } else {
-            allowDisplaySleep()
+            displaySleepController.allow()
         }
-    }
-
-    private func preventDisplaySleep() {
-        guard displaySleepActivity == nil else { return }
-        displaySleepActivity = ProcessInfo.processInfo.beginActivity(
-            options: .idleDisplaySleepDisabled,
-            reason: "A person is present at this Mac"
-        )
-    }
-
-    private func allowDisplaySleep() {
-        guard let activity = displaySleepActivity else { return }
-        ProcessInfo.processInfo.endActivity(activity)
-        displaySleepActivity = nil
     }
 
     private func refreshCameras() {
@@ -461,11 +416,23 @@ final class PresenceController: ObservableObject {
         probeSchedule.reset()
     }
 
-    private func refreshSystemDisplayActivityIfNeeded(at time: TimeInterval) {
-        guard time >= nextSystemActivityCheckAt else { return }
-        anotherProcessPreventsDisplaySleep =
-            systemDisplayActivityMonitor.anotherProcessPreventsDisplaySleep()
-        nextSystemActivityCheckAt = time + systemActivityCheckInterval
+    private func suspendMonitoring(with status: MonitoringStatus) {
+        self.status = status
+        resetMonitoringCycle()
+        displaySleepController.allow()
+        resetCameraRetry()
+    }
+
+    private func refreshDisplayActivityIfNeeded(at time: TimeInterval) {
+        guard time >= nextDisplayActivityCheckAt else { return }
+        if let isActive =
+            systemDisplayActivityMonitor.isDisplayKeptAwakeByAnotherProcess() {
+            if displayKeptAwakeExternally && !isActive {
+                userActivityMonitor.recordActivity(at: time)
+            }
+            displayKeptAwakeExternally = isActive
+        }
+        nextDisplayActivityCheckAt = time + Timing.displayActivityCheck
     }
 
     private func reevaluate() {
@@ -473,13 +440,18 @@ final class PresenceController: ObservableObject {
         tick()
     }
 
-    private static var userIdleTime: TimeInterval {
-        guard let anyInputEvent = CGEventType(rawValue: UInt32.max) else {
-            return 0
+    private func startCameraDeviceMonitoring() {
+        let center = NotificationCenter.default
+        let notifications = [
+            AVCaptureDevice.wasConnectedNotification,
+            AVCaptureDevice.wasDisconnectedNotification
+        ]
+        cameraDeviceObservers = notifications.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshCameras()
+                }
+            }
         }
-        return CGEventSource.secondsSinceLastEventType(
-            .combinedSessionState,
-            eventType: anyInputEvent
-        )
     }
 }

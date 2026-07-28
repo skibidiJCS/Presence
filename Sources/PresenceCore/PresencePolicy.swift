@@ -10,23 +10,16 @@ public enum PresencePhase: Equatable, Sendable {
 public struct PresenceDecision: Equatable, Sendable {
     public let phase: PresencePhase
     public let shouldKeepDisplayAwake: Bool
-
-    public init(phase: PresencePhase, shouldKeepDisplayAwake: Bool) {
-        self.phase = phase
-        self.shouldKeepDisplayAwake = shouldKeepDisplayAwake
-    }
 }
 
 public struct PresencePolicy: Sendable {
     private var hasObservation = false
-    private var lastSeenAt: TimeInterval?
     private var missingSince: TimeInterval?
 
     public init() {}
 
     public mutating func reset() {
         hasObservation = false
-        lastSeenAt = nil
         missingSince = nil
     }
 
@@ -34,7 +27,6 @@ public struct PresencePolicy: Sendable {
         hasObservation = true
 
         if personDetected {
-            lastSeenAt = time
             missingSince = nil
         } else if missingSince == nil {
             missingSince = time
@@ -61,4 +53,3 @@ public struct PresencePolicy: Sendable {
         return PresenceDecision(phase: .absent, shouldKeepDisplayAwake: false)
     }
 }
-

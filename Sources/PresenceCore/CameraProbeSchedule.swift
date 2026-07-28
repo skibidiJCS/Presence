@@ -6,10 +6,6 @@ public struct CameraProbeSchedule: Sendable {
 
     public init() {}
 
-    public var isProbeActive: Bool {
-        probeStartedAt != nil
-    }
-
     public mutating func reset() {
         probeStartedAt = nil
         nextProbeAt = 0
@@ -44,4 +40,3 @@ public struct CameraProbeSchedule: Sendable {
         nextProbeAt = time + recheckInterval
     }
 }
-

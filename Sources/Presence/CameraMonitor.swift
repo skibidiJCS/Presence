@@ -14,32 +14,19 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         label: "com.jiacai.presence.vision",
         qos: .utility
     )
+    private let callbackLock = NSLock()
 
     private var observationHandler: (@Sendable (Bool) -> Void)?
     private var errorHandler: (@Sendable (String) -> Void)?
+    private var activeOutput: AVCaptureOutput?
+    private var callbackGeneration = 0
     private var lastAnalysisTime: TimeInterval = 0
     private var lastBodyAnalysisTime: TimeInterval = 0
     private let analysisInterval: TimeInterval = 1
     private let bodyAnalysisInterval: TimeInterval = 3
 
     static func availableCameras() -> [CameraChoice] {
-        var deviceTypes: [AVCaptureDevice.DeviceType] = [
-            .builtInWideAngleCamera,
-            .externalUnknown
-        ]
-
-        if #available(macOS 14.0, *) {
-            deviceTypes.append(.continuityCamera)
-            deviceTypes.append(.deskViewCamera)
-        }
-
-        let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: deviceTypes,
-            mediaType: .video,
-            position: .unspecified
-        )
-
-        return discovery.devices.map {
+        captureDevices().map {
             CameraChoice(id: $0.uniqueID, name: $0.localizedName)
         }
     }
@@ -49,15 +36,21 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         onObservation: @escaping @Sendable (Bool) -> Void,
         onError: @escaping @Sendable (String) -> Void
     ) {
-        observationHandler = onObservation
-        errorHandler = onError
+        let generation = installCallbacks(
+            onObservation: onObservation,
+            onError: onError
+        )
 
         sessionQueue.async { [weak self] in
-            self?.configureAndStart(deviceID: deviceID)
+            self?.configureAndStart(
+                deviceID: deviceID,
+                generation: generation
+            )
         }
     }
 
     func stop() {
+        invalidateCallbacks()
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if session.isRunning {
@@ -70,7 +63,11 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    private func configureAndStart(deviceID: String?) {
+    private func configureAndStart(
+        deviceID: String?,
+        generation: Int
+    ) {
+        guard isCurrentGeneration(generation) else { return }
         if session.isRunning {
             return
         }
@@ -81,7 +78,7 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         } ?? AVCaptureDevice.default(for: .video) ?? cameras.first
 
         guard let selectedDevice else {
-            errorHandler?("No camera was found.")
+            reportError("No camera was found.", generation: generation)
             return
         }
 
@@ -102,7 +99,10 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
             guard session.canAddInput(input), session.canAddOutput(output) else {
                 session.commitConfiguration()
-                errorHandler?("The selected camera could not be configured.")
+                reportError(
+                    "The selected camera could not be configured.",
+                    generation: generation
+                )
                 return
             }
 
@@ -110,26 +110,32 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             session.addOutput(output)
             session.commitConfiguration()
 
+            guard activate(output: output, generation: generation) else {
+                return
+            }
             lowerFrameRate(for: selectedDevice)
             session.startRunning()
         } catch {
-            errorHandler?("Could not start \(selectedDevice.localizedName).")
+            reportError(
+                "Could not start \(selectedDevice.localizedName).",
+                generation: generation
+            )
         }
     }
 
     private static func captureDevices() -> [AVCaptureDevice] {
-        var deviceTypes: [AVCaptureDevice.DeviceType] = [
+        var types: [AVCaptureDevice.DeviceType] = [
             .builtInWideAngleCamera,
             .externalUnknown
         ]
 
         if #available(macOS 14.0, *) {
-            deviceTypes.append(.continuityCamera)
-            deviceTypes.append(.deskViewCamera)
+            types.append(.continuityCamera)
+            types.append(.deskViewCamera)
         }
 
         return AVCaptureDevice.DiscoverySession(
-            deviceTypes: deviceTypes,
+            deviceTypes: types,
             mediaType: .video,
             position: .unspecified
         ).devices
@@ -144,17 +150,14 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
         let targetFPS = max(1, slowestSupportedFPS)
 
-        do {
-            try device.lockForConfiguration()
-            let duration = CMTime(
-                seconds: 1 / targetFPS,
-                preferredTimescale: 600
-            )
-            device.activeVideoMinFrameDuration = duration
-            device.activeVideoMaxFrameDuration = duration
-            device.unlockForConfiguration()
-        } catch {
-        }
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        let duration = CMTime(
+            seconds: 1 / targetFPS,
+            preferredTimescale: 600
+        )
+        device.activeVideoMinFrameDuration = duration
+        device.activeVideoMaxFrameDuration = duration
+        device.unlockForConfiguration()
     }
 
     func captureOutput(
@@ -182,7 +185,7 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 $0.confidence >= 0.35 && $0.boundingBox.width >= 0.04
             }
             if faceDetected {
-                observationHandler?(true)
+                reportObservation(true, from: output)
                 return
             }
 
@@ -203,9 +206,81 @@ final class CameraMonitor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             let personDetected = (personRequest.results ?? []).contains {
                 $0.confidence >= 0.25 && $0.boundingBox.height >= 0.16
             }
-            observationHandler?(personDetected)
+            reportObservation(personDetected, from: output)
         } catch {
-            errorHandler?("On-device presence detection failed.")
+            reportError(
+                "On-device presence detection failed.",
+                from: output
+            )
         }
+    }
+
+    private func installCallbacks(
+        onObservation: @escaping @Sendable (Bool) -> Void,
+        onError: @escaping @Sendable (String) -> Void
+    ) -> Int {
+        callbackLock.lock()
+        callbackGeneration += 1
+        activeOutput = nil
+        observationHandler = onObservation
+        errorHandler = onError
+        let generation = callbackGeneration
+        callbackLock.unlock()
+        return generation
+    }
+
+    private func invalidateCallbacks() {
+        callbackLock.lock()
+        callbackGeneration += 1
+        activeOutput = nil
+        callbackLock.unlock()
+    }
+
+    private func isCurrentGeneration(_ generation: Int) -> Bool {
+        callbackLock.lock()
+        let isCurrent = callbackGeneration == generation
+        callbackLock.unlock()
+        return isCurrent
+    }
+
+    private func activate(
+        output: AVCaptureOutput,
+        generation: Int
+    ) -> Bool {
+        callbackLock.lock()
+        guard callbackGeneration == generation else {
+            callbackLock.unlock()
+            return false
+        }
+        activeOutput = output
+        callbackLock.unlock()
+        return true
+    }
+
+    private func reportObservation(
+        _ detected: Bool,
+        from output: AVCaptureOutput
+    ) {
+        callbackLock.lock()
+        let handler = activeOutput === output ? observationHandler : nil
+        callbackLock.unlock()
+        handler?(detected)
+    }
+
+    private func reportError(
+        _ message: String,
+        from output: AVCaptureOutput
+    ) {
+        callbackLock.lock()
+        let handler = activeOutput === output ? errorHandler : nil
+        callbackLock.unlock()
+        handler?(message)
+    }
+
+    private func reportError(_ message: String, generation: Int) {
+        callbackLock.lock()
+        let handler = callbackGeneration == generation ? errorHandler : nil
+        callbackLock.unlock()
+        handler?(message)
     }
 }
