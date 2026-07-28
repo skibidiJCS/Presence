@@ -7,6 +7,13 @@ Presence is a private, native macOS menu-bar utility that keeps the display awak
 - Frames are never stored or uploaded.
 - A configurable grace period tolerates looking away and temporary occlusion.
 
+## Architecture
+
+- `PresenceController` coordinates input, system display activity, power assertions, and camera probes.
+- `CameraProbeSchedule` and `PresencePolicy` contain the testable timing rules.
+- `SystemDisplayActivityMonitor` detects display-sleep assertions from video players without screen recording.
+- `CameraMonitor` performs short, low-frame-rate, on-device Vision checks.
+
 ## Build
 
 Requires macOS 13 or newer and Xcode command-line tools.

@@ -28,4 +28,23 @@ struct UtilityPolicyTests {
 
         #expect(idleTime == 4)
     }
+
+    @Test
+    func cameraProbeStopsAtMaximumDuration() {
+        var schedule = CameraProbeSchedule()
+        schedule.markProbeStarted(at: 100)
+
+        #expect(!schedule.probeTimedOut(at: 105, maximumDuration: 6))
+        #expect(schedule.probeTimedOut(at: 106, maximumDuration: 6))
+    }
+
+    @Test
+    func successfulProbeWaitsBeforeCheckingAgain() {
+        var schedule = CameraProbeSchedule()
+        schedule.markProbeStarted(at: 100)
+        schedule.markPresenceDetected(at: 102, recheckInterval: 30)
+
+        #expect(!schedule.shouldStartProbe(at: 131))
+        #expect(schedule.shouldStartProbe(at: 132))
+    }
 }

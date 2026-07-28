@@ -8,6 +8,7 @@ enum MonitoringStatus: Equatable {
     case present
     case gracePeriod(secondsRemaining: TimeInterval)
     case absent
+    case displayAlreadyAwake
     case permissionDenied
     case cameraUnavailable(String)
 
@@ -20,6 +21,7 @@ enum MonitoringStatus: Equatable {
         case .present: "You’re present"
         case .gracePeriod: "Presence temporarily lost"
         case .absent: "No one detected"
+        case .displayAlreadyAwake: "Display already kept awake"
         case .permissionDenied: "Camera access required"
         case .cameraUnavailable: "Camera unavailable"
         }
@@ -41,6 +43,8 @@ enum MonitoringStatus: Equatable {
             "Waiting \(Self.duration(seconds)) before allowing sleep."
         case .absent:
             "Display sleep is allowed until you return."
+        case .displayAlreadyAwake:
+            "A video or another app is preventing display sleep. Camera stays off."
         case .permissionDenied:
             "Allow Presence in System Settings → Privacy & Security → Camera."
         case let .cameraUnavailable(message):
@@ -57,13 +61,14 @@ enum MonitoringStatus: Equatable {
         case .present: "person.crop.circle.fill"
         case .gracePeriod: "person.crop.circle.badge.questionmark"
         case .absent: "moon.fill"
+        case .displayAlreadyAwake: "play.rectangle.fill"
         case .permissionDenied, .cameraUnavailable: "exclamationmark.triangle.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .present: .green
+        case .present, .displayAlreadyAwake: .green
         case .checking, .gracePeriod: .orange
         case .permissionDenied, .cameraUnavailable: .red
         case .disabled, .paused, .waiting, .absent: .secondary
@@ -80,4 +85,3 @@ enum MonitoringStatus: Equatable {
         return remainder == 0 ? "\(minutes)m" : "\(minutes)m \(remainder)s"
     }
 }
-
