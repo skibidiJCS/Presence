@@ -58,6 +58,7 @@ final class PresenceController: ObservableObject {
         case .permissionDenied, .cameraUnavailable: "exclamationmark.triangle.fill"
         case .disabled: "eye.slash"
         case .paused: "pause.circle"
+        case .displayAsleep: "moon.fill"
         case .waiting, .absent: "eye"
         }
     }
@@ -87,6 +88,7 @@ final class PresenceController: ObservableObject {
     private var timer: Timer?
     private var cameraDeviceObservers: [NSObjectProtocol] = []
     private var started = false
+    private var displayIsAsleep = false
     private var nextPlaybackCheckAt: TimeInterval = 0
     private var playbackActivity: PlaybackActivity = .none
     private var cameraRetryAfter: TimeInterval = 0
@@ -114,11 +116,7 @@ final class PresenceController: ObservableObject {
         refreshLoginItemStatus()
         requestCameraAccessIfNeeded()
 
-        timer = Timer.scheduledTimer(withTimeInterval: Timing.tick, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.tick()
-            }
-        }
+        startTimer()
 
         userActivityMonitor.start { [weak self] in
             self?.handleInteraction()
@@ -142,8 +140,7 @@ final class PresenceController: ObservableObject {
     }
 
     func shutdown() {
-        timer?.invalidate()
-        timer = nil
+        stopTimer()
         userActivityMonitor.stop()
         cameraDeviceObservers.forEach(NotificationCenter.default.removeObserver)
         cameraDeviceObservers.removeAll()
@@ -200,11 +197,14 @@ final class PresenceController: ObservableObject {
     }
 
     @objc private func screenDidSleep() {
-        resetMonitoringCycle()
-        displaySleepController.allow()
+        displayIsAsleep = true
+        stopTimer()
+        suspendMonitoring(with: .displayAsleep)
     }
 
     @objc private func screenDidWake() {
+        displayIsAsleep = false
+        startTimer()
         recordInteraction()
     }
 
@@ -230,6 +230,11 @@ final class PresenceController: ObservableObject {
 
         guard !isPaused else {
             suspendMonitoring(with: .paused)
+            return
+        }
+
+        guard !displayIsAsleep else {
+            suspendMonitoring(with: .displayAsleep)
             return
         }
 
@@ -302,6 +307,8 @@ final class PresenceController: ObservableObject {
     }
 
     private func startCamera(at time: TimeInterval) {
+        guard !displayIsAsleep else { return }
+
         guard !cameras.isEmpty else {
             status = .cameraUnavailable("No camera was found.")
             displaySleepController.allow()
@@ -452,6 +459,23 @@ final class PresenceController: ObservableObject {
     private func reevaluate() {
         guard started else { return }
         tick()
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(
+            withTimeInterval: Timing.tick,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.tick()
+            }
+        }
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
     }
 
     private func startCameraDeviceMonitoring() {

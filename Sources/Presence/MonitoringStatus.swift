@@ -3,6 +3,7 @@ import SwiftUI
 enum MonitoringStatus: Equatable {
     case disabled
     case paused
+    case displayAsleep
     case waiting(secondsRemaining: TimeInterval)
     case checking
     case present
@@ -17,6 +18,7 @@ enum MonitoringStatus: Equatable {
         switch self {
         case .disabled: "Detection off"
         case .paused: "Monitoring paused"
+        case .displayAsleep: "Display is asleep"
         case .waiting: "Waiting for inactivity"
         case .checking: "Checking for presence"
         case .present: "You’re present"
@@ -35,6 +37,8 @@ enum MonitoringStatus: Equatable {
             "macOS controls display sleep normally."
         case .paused:
             "Camera and sleep prevention are off."
+        case .displayAsleep:
+            "Camera and monitoring resume after the display wakes."
         case let .waiting(seconds):
             "Camera starts in \(Self.duration(seconds))."
         case .checking:
@@ -60,6 +64,7 @@ enum MonitoringStatus: Equatable {
         switch self {
         case .disabled: "eye.slash"
         case .paused: "pause.circle.fill"
+        case .displayAsleep: "moon.fill"
         case .waiting: "clock.fill"
         case .checking: "camera.fill"
         case .present: "person.crop.circle.fill"
@@ -76,7 +81,7 @@ enum MonitoringStatus: Equatable {
         case .present, .displayAlreadyAwake, .audioPlaying: .green
         case .checking, .gracePeriod: .orange
         case .permissionDenied, .cameraUnavailable: .red
-        case .disabled, .paused, .waiting, .absent: .secondary
+        case .disabled, .paused, .displayAsleep, .waiting, .absent: .secondary
         }
     }
 
