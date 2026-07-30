@@ -9,6 +9,7 @@ enum MonitoringStatus: Equatable {
     case gracePeriod(secondsRemaining: TimeInterval)
     case absent
     case displayAlreadyAwake
+    case audioPlaying
     case permissionDenied
     case cameraUnavailable(String)
 
@@ -22,6 +23,7 @@ enum MonitoringStatus: Equatable {
         case .gracePeriod: "Presence temporarily lost"
         case .absent: "No one detected"
         case .displayAlreadyAwake: "Display already kept awake"
+        case .audioPlaying: "Audio playing"
         case .permissionDenied: "Camera access required"
         case .cameraUnavailable: "Camera unavailable"
         }
@@ -45,6 +47,8 @@ enum MonitoringStatus: Equatable {
             "Display sleep is allowed until you return."
         case .displayAlreadyAwake:
             "A video or another app is preventing display sleep. Camera stays off."
+        case .audioPlaying:
+            "Presence is preventing display sleep. Camera stays off."
         case .permissionDenied:
             "Allow Presence in System Settings → Privacy & Security → Camera."
         case let .cameraUnavailable(message):
@@ -62,13 +66,14 @@ enum MonitoringStatus: Equatable {
         case .gracePeriod: "person.crop.circle.badge.questionmark"
         case .absent: "moon.fill"
         case .displayAlreadyAwake: "play.rectangle.fill"
+        case .audioPlaying: "speaker.wave.2.fill"
         case .permissionDenied, .cameraUnavailable: "exclamationmark.triangle.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .present, .displayAlreadyAwake: .green
+        case .present, .displayAlreadyAwake, .audioPlaying: .green
         case .checking, .gracePeriod: .orange
         case .permissionDenied, .cameraUnavailable: .red
         case .disabled, .paused, .waiting, .absent: .secondary

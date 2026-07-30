@@ -36,6 +36,80 @@ struct UtilityPolicyTests {
     }
 
     @Test
+    func audioOutputCountsAsPlayback() {
+        let classifier = PlaybackActivityClassifier()
+        let signal = PlaybackSignal(
+            ownerProcessID: 10,
+            isActive: true,
+            preventsDisplaySleep: false,
+            preventsIdleSystemSleep: true,
+            resources: ["audio-out"]
+        )
+
+        #expect(classifier.activity(from: [signal], excluding: 20) == .audio)
+    }
+
+    @Test
+    func audioInputDoesNotCountAsPlayback() {
+        let classifier = PlaybackActivityClassifier()
+        let signal = PlaybackSignal(
+            ownerProcessID: 10,
+            isActive: true,
+            preventsDisplaySleep: false,
+            preventsIdleSystemSleep: true,
+            resources: ["audio-in"]
+        )
+
+        #expect(classifier.activity(from: [signal], excluding: 20) == .none)
+    }
+
+    @Test
+    func displayPlaybackTakesPriorityOverAudio() {
+        let classifier = PlaybackActivityClassifier()
+        let audio = PlaybackSignal(
+            ownerProcessID: 10,
+            isActive: true,
+            preventsDisplaySleep: false,
+            preventsIdleSystemSleep: true,
+            resources: ["audio-out"]
+        )
+        let display = PlaybackSignal(
+            ownerProcessID: 11,
+            isActive: true,
+            preventsDisplaySleep: true,
+            preventsIdleSystemSleep: false,
+            resources: []
+        )
+
+        #expect(
+            classifier.activity(from: [audio, display], excluding: 20) == .display
+        )
+    }
+
+    @Test
+    func inactiveAndOwnedSignalsAreIgnored() {
+        let classifier = PlaybackActivityClassifier()
+        let inactive = PlaybackSignal(
+            ownerProcessID: 10,
+            isActive: false,
+            preventsDisplaySleep: false,
+            preventsIdleSystemSleep: true,
+            resources: ["audio-out"]
+        )
+        let owned = PlaybackSignal(
+            ownerProcessID: 20,
+            isActive: true,
+            preventsDisplaySleep: true,
+            preventsIdleSystemSleep: false,
+            resources: []
+        )
+
+        #expect(
+            classifier.activity(from: [inactive, owned], excluding: 20) == .none
+        )
+    }
+
+    @Test
     func cameraProbeStopsAtMaximumDuration() {
         var schedule = CameraProbeSchedule()
         schedule.markProbeStarted(at: 100)

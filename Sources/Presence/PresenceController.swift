@@ -54,6 +54,7 @@ final class PresenceController: ObservableObject {
         case .present: "person.crop.circle.fill"
         case .checking, .gracePeriod: "eye.fill"
         case .displayAlreadyAwake: "play.rectangle.fill"
+        case .audioPlaying: "speaker.wave.2.fill"
         case .permissionDenied, .cameraUnavailable: "exclamationmark.triangle.fill"
         case .disabled: "eye.slash"
         case .paused: "pause.circle"
@@ -72,13 +73,13 @@ final class PresenceController: ObservableObject {
         static let tick: TimeInterval = 1
         static let maximumProbe: TimeInterval = 5
         static let presenceRecheck: TimeInterval = 45
-        static let displayActivityCheck: TimeInterval = 2
+        static let playbackCheck: TimeInterval = 2
         static let cameraRetry: TimeInterval = 15
     }
 
     private let defaults = UserDefaults.standard
     private let cameraMonitor = CameraMonitor()
-    private let systemDisplayActivityMonitor = SystemDisplayActivityMonitor()
+    private let systemPlaybackMonitor = SystemPlaybackMonitor()
     private let userActivityMonitor = UserActivityMonitor()
     private let displaySleepController = DisplaySleepController()
     private var policy = PresencePolicy()
@@ -86,8 +87,8 @@ final class PresenceController: ObservableObject {
     private var timer: Timer?
     private var cameraDeviceObservers: [NSObjectProtocol] = []
     private var started = false
-    private var nextDisplayActivityCheckAt: TimeInterval = 0
-    private var displayKeptAwakeExternally = false
+    private var nextPlaybackCheckAt: TimeInterval = 0
+    private var playbackActivity: PlaybackActivity = .none
     private var cameraRetryAfter: TimeInterval = 0
     private var cameraFailureMessage: String?
     private var cameraGeneration = 0
@@ -232,11 +233,18 @@ final class PresenceController: ObservableObject {
             return
         }
 
-        refreshDisplayActivityIfNeeded(at: now)
-        if displayKeptAwakeExternally {
+        refreshPlaybackActivityIfNeeded(at: now)
+        switch playbackActivity {
+        case .audio:
+            userActivityMonitor.recordActivity(at: now)
+            suspendMonitoring(with: .audioPlaying, keepDisplayAwake: true)
+            return
+        case .display:
             userActivityMonitor.recordActivity(at: now)
             suspendMonitoring(with: .displayAlreadyAwake)
             return
+        case .none:
+            break
         }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -416,23 +424,29 @@ final class PresenceController: ObservableObject {
         probeSchedule.reset()
     }
 
-    private func suspendMonitoring(with status: MonitoringStatus) {
+    private func suspendMonitoring(
+        with status: MonitoringStatus,
+        keepDisplayAwake: Bool = false
+    ) {
         self.status = status
         resetMonitoringCycle()
-        displaySleepController.allow()
+        if keepDisplayAwake {
+            displaySleepController.prevent()
+        } else {
+            displaySleepController.allow()
+        }
         resetCameraRetry()
     }
 
-    private func refreshDisplayActivityIfNeeded(at time: TimeInterval) {
-        guard time >= nextDisplayActivityCheckAt else { return }
-        if let isActive =
-            systemDisplayActivityMonitor.isDisplayKeptAwakeByAnotherProcess() {
-            if displayKeptAwakeExternally && !isActive {
+    private func refreshPlaybackActivityIfNeeded(at time: TimeInterval) {
+        guard time >= nextPlaybackCheckAt else { return }
+        if let activity = systemPlaybackMonitor.activity() {
+            if playbackActivity != .none && activity == .none {
                 userActivityMonitor.recordActivity(at: time)
             }
-            displayKeptAwakeExternally = isActive
+            playbackActivity = activity
         }
-        nextDisplayActivityCheckAt = time + Timing.displayActivityCheck
+        nextPlaybackCheckAt = time + Timing.playbackCheck
     }
 
     private func reevaluate() {

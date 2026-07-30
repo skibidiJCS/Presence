@@ -7,7 +7,7 @@ final class DisplaySleepController {
         guard activity == nil else { return }
         activity = ProcessInfo.processInfo.beginActivity(
             options: .idleDisplaySleepDisabled,
-            reason: "A person is present at this Mac"
+            reason: "Presence is keeping the display awake"
         )
     }
 
@@ -17,4 +17,3 @@ final class DisplaySleepController {
         self.activity = nil
     }
 }
-
